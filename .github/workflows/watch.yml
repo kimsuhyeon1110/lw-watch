@@ -1,0 +1,61 @@
+name: watch
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # restart regularly; the concurrency group keeps one run going
+  workflow_dispatch:
+
+# No token permissions needed: the job only calls public HTTP endpoints.
+permissions: {}
+
+concurrency:
+  group: watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Check remaining tickets
+        env:
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+        shell: bash
+        run: |
+          set -u
+          if [ -z "${BARK_KEY:-}" ]; then echo "BARK_KEY secret missing"; exit 1; fi
+
+          # Stop for good after purchases close (KST 2026-11-19 23:59).
+          deadline=$(date -d "2026-11-19 23:59 +0900" +%s)
+          # Leave each run before the 6h job limit.
+          run_end=$(( $(date +%s) + 345*60 ))
+
+          urlenc() { python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$1"; }
+
+          declare -A prev=( [030095]=0 [030097]=0 [030099]=0 )
+          declare -A name=( [030095]=A [030097]=B [030099]=C )
+
+          while [ "$(date +%s)" -lt "$run_end" ] && [ "$(date +%s)" -lt "$deadline" ]; do
+            for ev in 030095 030097 030099; do
+              body=$(printf '{"BUKRS":"1200","GSBER":"1210","OPER_DT":"20261121","TO_MGT_CD":"2025000028","CHNL_CD":"OMWPL001","EVENT_CD":"%s","EVENT_SEQ":"1"}' "$ev")
+              r=$(curl -s -m 15 -X POST https://advticket.lotteworld.com/api/eai/toCheck \
+                    -H 'Content-Type: application/json' -H 'Accept: application/json' \
+                    -A 'Mozilla/5.0' -d "$body" || true)
+              q=$(printf '%s' "$r" | sed -n 's/.*"RMN_TCKET_QTY":"\([0-9]*\)".*/\1/p')
+              q=${q:-0}
+              # Alert only when a course goes from 0 to available.
+              if [ "$q" -gt 0 ] && [ "${prev[$ev]}" -eq 0 ]; then
+                c=${name[$ev]}
+                echo "$(date -u +%FT%TZ) course $c: $q available, alerting"
+                t=$(urlenc "🚨 취소표 발생!")
+                m=$(urlenc "다크어드벤처 ${c}코스 취소표 ${q}장! 지금 바로 예매하세요")
+                for i in 1 2 3; do
+                  curl -s -o /dev/null -m 10 "https://api.day.app/${BARK_KEY}/${t}/${m}?level=critical&volume=5&sound=TalkFile_cancelticket&call=1" || true
+                  sleep 5
+                done
+              fi
+              prev[$ev]=$q
+            done
+            sleep 20
+          done
+          echo "run finished"
