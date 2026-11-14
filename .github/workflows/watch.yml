@@ -4,12 +4,18 @@ on:
   schedule:
     - cron: "*/30 * * * *"   # restart regularly; the concurrency group keeps one run going
   workflow_dispatch:
+    inputs:
+      selftest:
+        description: "Check once, print counts, and exit"
+        type: boolean
+        default: false
 
 # No token permissions needed: the job only calls public HTTP endpoints.
 permissions: {}
 
 concurrency:
-  group: watch
+  # Self-tests run on their own so they never replace the long-running watch.
+  group: ${{ inputs.selftest && 'selftest' || 'watch' }}
   cancel-in-progress: false
 
 jobs:
@@ -20,9 +26,20 @@ jobs:
       - name: Check remaining tickets
         env:
           BARK_KEY: ${{ secrets.BARK_KEY }}
+          SELFTEST: ${{ inputs.selftest && '1' || '0' }}
         shell: bash
         run: |
           set -u
+          if [ "$SELFTEST" = "1" ]; then
+            for ev in 030095 030097 030099; do
+              body=$(printf '{"BUKRS":"1200","GSBER":"1210","OPER_DT":"20261121","TO_MGT_CD":"2025000028","CHNL_CD":"OMWPL001","EVENT_CD":"%s","EVENT_SEQ":"1"}' "$ev")
+              code=$(curl -s -o /tmp/r -w '%{http_code}' -m 15 -X POST https://advticket.lotteworld.com/api/eai/toCheck \
+                       -H 'Content-Type: application/json' -H 'Accept: application/json' -A 'Mozilla/5.0' -d "$body" || echo fail)
+              q=$(sed -n 's/.*"RMN_TCKET_QTY":"\([0-9]*\)".*/\1/p' /tmp/r)
+              echo "event $ev: http=$code remain=${q:-none}"
+            done
+            exit 0
+          fi
           if [ -z "${BARK_KEY:-}" ]; then echo "BARK_KEY secret missing"; exit 1; fi
 
           # Stop for good after purchases close (KST 2026-11-19 23:59).
