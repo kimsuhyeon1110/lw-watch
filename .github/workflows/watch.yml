@@ -27,16 +27,19 @@ jobs:
         env:
           BARK_KEY: ${{ secrets.BARK_KEY }}
           SELFTEST: ${{ inputs.selftest && '1' || '0' }}
+          # date:event:label  (Sat 11/21 and Sun 11/22, courses A/B/C)
+          ITEMS: "20261121:030095:11/21(토)A 20261121:030097:11/21(토)B 20261121:030099:11/21(토)C 20261122:030096:11/22(일)A 20261122:030098:11/22(일)B 20261122:030100:11/22(일)C"
         shell: bash
         run: |
           set -u
           if [ "$SELFTEST" = "1" ]; then
-            for ev in 030095 030097 030099; do
-              body=$(printf '{"BUKRS":"1200","GSBER":"1210","OPER_DT":"20261121","TO_MGT_CD":"2025000028","CHNL_CD":"OMWPL001","EVENT_CD":"%s","EVENT_SEQ":"1"}' "$ev")
+            for it in $ITEMS; do
+              d=${it%%:*}; ev=${it#*:}; ev=${ev%%:*}
+              body=$(printf '{"BUKRS":"1200","GSBER":"1210","OPER_DT":"%s","TO_MGT_CD":"2025000028","CHNL_CD":"OMWPL001","EVENT_CD":"%s","EVENT_SEQ":"1"}' "$d" "$ev")
               code=$(curl -s -o /tmp/r -w '%{http_code}' -m 15 -X POST https://advticket.lotteworld.com/api/eai/toCheck \
                        -H 'Content-Type: application/json' -H 'Accept: application/json' -A 'Mozilla/5.0' -d "$body" || echo fail)
               q=$(sed -n 's/.*"RMN_TCKET_QTY":"\([0-9]*\)".*/\1/p' /tmp/r)
-              echo "event $ev: http=$code remain=${q:-none}"
+              echo "event $d $ev: http=$code remain=${q:-none}"
             done
             exit 0
           fi
@@ -49,21 +52,20 @@ jobs:
 
           urlenc() { python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$1"; }
 
-          declare -A prev=( [030095]=0 [030097]=0 [030099]=0 )
-          declare -A name=( [030095]=A [030097]=B [030099]=C )
+          declare -A prev=()
 
           while [ "$(date +%s)" -lt "$run_end" ] && [ "$(date +%s)" -lt "$deadline" ]; do
-            for ev in 030095 030097 030099; do
-              body=$(printf '{"BUKRS":"1200","GSBER":"1210","OPER_DT":"20261121","TO_MGT_CD":"2025000028","CHNL_CD":"OMWPL001","EVENT_CD":"%s","EVENT_SEQ":"1"}' "$ev")
+            for it in $ITEMS; do
+              d=${it%%:*}; rest=${it#*:}; ev=${rest%%:*}; c=${rest#*:}
+              body=$(printf '{"BUKRS":"1200","GSBER":"1210","OPER_DT":"%s","TO_MGT_CD":"2025000028","CHNL_CD":"OMWPL001","EVENT_CD":"%s","EVENT_SEQ":"1"}' "$d" "$ev")
               r=$(curl -s -m 15 -X POST https://advticket.lotteworld.com/api/eai/toCheck \
                     -H 'Content-Type: application/json' -H 'Accept: application/json' \
                     -A 'Mozilla/5.0' -d "$body" || true)
               q=$(printf '%s' "$r" | sed -n 's/.*"RMN_TCKET_QTY":"\([0-9]*\)".*/\1/p')
               q=${q:-0}
               # Alert only when a course goes from 0 to available.
-              if [ "$q" -gt 0 ] && [ "${prev[$ev]}" -eq 0 ]; then
-                c=${name[$ev]}
-                echo "$(date -u +%FT%TZ) course $c: $q available, alerting"
+              if [ "$q" -gt 0 ] && [ "${prev[$ev]:-0}" -eq 0 ]; then
+                echo "$(date -u +%FT%TZ) $c: $q available, alerting"
                 t=$(urlenc "🚨 취소표 발생!")
                 m=$(urlenc "다크어드벤처 ${c}코스 취소표 ${q}장! 지금 바로 예매하세요")
                 for i in 1 2 3; do
